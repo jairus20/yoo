@@ -1,127 +1,64 @@
 <?php
-/**
- * tcp_server.php
- *
- * Servidor TCP que recibe una línea de texto con el formato:
- *   "algoritmo número1 número2 ... númeroN\n"
- *
- * Ejemplo de entrada:
- *   "quick 34 7 23 32 5 62 3 15\n"
- *
- * El servidor separa el algoritmo del arreglo, ejecuta el ordenamiento usando el algoritmo
- * indicado y responde con una línea que contiene el arreglo ordenado.
- *
- * Algoritmos soportados:
- *   bubble, counting, heapsort, insertion, merge, quick, selection.
- */
-
-set_time_limit(0);
-error_reporting(E_ALL);
-
-$host = '192.168.1.10';
-$port = 2020; // Puerto para conexiones TCP
-
-// Crear el socket TCP
-$sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-if (!$sock) {
-    die("Error al crear el socket: " . socket_strerror(socket_last_error()) . "\n");
+// Configuración del servidor
+$address = '0.0.0.0'; // Escuchar en todas las interfaces
+$port = 2020;
+$server = stream_socket_server("tcp://$address:$port", $errno, $errstr);
+if (!$server) {
+    die("Error al iniciar el servidor: $errstr ($errno)\n");
 }
 
-if (!socket_bind($sock, $host, $port)) {
-    die("Error en bind: " . socket_strerror(socket_last_error($sock)) . "\n");
-}
+echo "Servidor iniciado en $address:$port\n";
 
-if (!socket_listen($sock, 5)) {
-    die("Error en listen: " . socket_strerror(socket_last_error($sock)) . "\n");
-}
-
-echo "Servidor TCP iniciado en {$host}:{$port}\n";
-
-// Bucle principal para aceptar clientes
-while (true) {
-    $client = socket_accept($sock);
-    if ($client === false) {
-        continue;
-    }
-
-    echo "Nuevo cliente conectado.\n";
-
-    $buffer = "";
-    // Acumula datos hasta encontrar un salto de línea ("\n")
-    while (strpos($buffer, "\n") === false) {
-        $part = socket_read($client, 2048, PHP_NORMAL_READ);
-        if ($part === false || $part === "") {
-            break;
-        }
-        $buffer .= $part;
-    }
-    $data = trim($buffer);
-    if ($data === "") {
-        socket_close($client);
+// Bucle principal para aceptar conexiones
+while ($client = @stream_socket_accept($server)) {
+    // Leer la solicitud del cliente (se asume que la cadena completa cabe en 9000 bytes)
+    $data = fread($client, 9000);
+    if ($data === false || trim($data) === "") {
+        fclose($client);
         continue;
     }
     
-    echo "Datos recibidos: $data\n";
-    
-    // Separar el algoritmo del resto de la línea
-    $parts = explode(" ", $data);
+    // Se espera un formato: "algoritmo,num1,num2,..."
+    $parts = explode(',', trim($data));
     $algorithm = strtolower(array_shift($parts));
-    $array = array_map('intval', $parts);
+    $numbers = array_map('intval', $parts);
     
-    if (empty($array)) {
-        $errorMsg = "Error: Se recibió un arreglo vacío.\n";
-        socket_write($client, $errorMsg, strlen($errorMsg));
-        socket_close($client);
-        continue;
-    }
-    
-    // Ejecutar el algoritmo de ordenamiento sin medir tiempo
+    // Seleccionar y ejecutar el algoritmo de ordenamiento solicitado
     switch ($algorithm) {
         case 'bubble':
-            $sortedArray = bubbleSort($array);
+            $sorted = bubbleSort($numbers);
             break;
         case 'counting':
-            $sortedArray = countingSort($array);
+            $sorted = countingSort($numbers);
             break;
         case 'heapsort':
-            $sortedArray = heapSort($array);
+            $sorted = heapSort($numbers);
             break;
         case 'insertion':
-            $sortedArray = insertionSort($array);
+            $sorted = insertionSort($numbers);
             break;
         case 'merge':
-            $sortedArray = mergeSort($array);
+            $sorted = mergeSort($numbers);
             break;
         case 'quick':
-            $sortedArray = quickSort($array);
+            $sorted = quickSort($numbers);
             break;
         case 'selection':
-            $sortedArray = selectionSort($array);
+            $sorted = selectionSort($numbers);
             break;
         default:
-            $errorMsg = "Error: Algoritmo desconocido. Usa: bubble, counting, heapsort, insertion, merge, quick, selection.\n";
-            socket_write($client, $errorMsg, strlen($errorMsg));
-            socket_close($client);
-            continue 2;
+            $sorted = $numbers;
+            break;
     }
     
-    // Preparar la respuesta: la línea con los números ordenados
-    $sortedString = implode(" ", $sortedArray) . "\n";
-    socket_write($client, $sortedString, strlen($sortedString));
-    
-    echo "Respuesta enviada: $sortedString\n";
-    
-    socket_close($client);
+    // Preparar la respuesta: arreglo ordenado como cadena separada por comas
+    $response = implode(',', $sorted);
+    fwrite($client, $response);
+    fclose($client);
 }
 
-socket_close($sock);
+// --- Funciones de ordenamiento ---
 
-/* ============================
-   IMPLEMENTACIÓN DE ALGORITMOS
-   ============================
-*/
-
-// 1. Bubble Sort
 function bubbleSort($arr) {
     $n = count($arr);
     for ($i = 0; $i < $n - 1; $i++) {
@@ -136,29 +73,31 @@ function bubbleSort($arr) {
     return $arr;
 }
 
-// 2. Counting Sort
 function countingSort($arr) {
-    $max = max($arr);
+    if(empty($arr)) return $arr;
     $min = min($arr);
-    $count = array_fill(0, $max - $min + 1, 0);
+    $max = max($arr);
+    $range = $max - $min + 1;
+    $count = array_fill(0, $range, 0);
     foreach ($arr as $num) {
         $count[$num - $min]++;
     }
-    $index = 0;
-    foreach ($count as $i => $val) {
-        while ($val-- > 0) {
-            $arr[$index++] = $i + $min;
+    $result = [];
+    for ($i = 0; $i < $range; $i++) {
+        while ($count[$i]-- > 0) {
+            $result[] = $i + $min;
         }
     }
-    return $arr;
+    return $result;
 }
 
-// 3. HeapSort
 function heapSort($arr) {
     $n = count($arr);
+    // Construir el heap (reorganizar el arreglo)
     for ($i = intval($n / 2) - 1; $i >= 0; $i--) {
         heapify($arr, $n, $i);
     }
+    // Extraer elementos uno a uno
     for ($i = $n - 1; $i > 0; $i--) {
         $temp = $arr[0];
         $arr[0] = $arr[$i];
@@ -169,14 +108,12 @@ function heapSort($arr) {
 }
 function heapify(&$arr, $n, $i) {
     $largest = $i;
-    $left = 2 * $i + 1;
-    $right = 2 * $i + 2;
-    if ($left < $n && $arr[$left] > $arr[$largest]) {
-        $largest = $left;
-    }
-    if ($right < $n && $arr[$right] > $arr[$largest]) {
-        $largest = $right;
-    }
+    $l = 2 * $i + 1;
+    $r = 2 * $i + 2;
+    if ($l < $n && $arr[$l] > $arr[$largest])
+        $largest = $l;
+    if ($r < $n && $arr[$r] > $arr[$largest])
+        $largest = $r;
     if ($largest != $i) {
         $temp = $arr[$i];
         $arr[$i] = $arr[$largest];
@@ -185,7 +122,6 @@ function heapify(&$arr, $n, $i) {
     }
 }
 
-// 4. Insertion Sort
 function insertionSort($arr) {
     $n = count($arr);
     for ($i = 1; $i < $n; $i++) {
@@ -200,18 +136,17 @@ function insertionSort($arr) {
     return $arr;
 }
 
-// 5. Merge Sort
 function mergeSort($arr) {
-    if (count($arr) <= 1) return $arr;
-    $mid = intval(count($arr) / 2);
-    $left = mergeSort(array_slice($arr, 0, $mid));
-    $right = mergeSort(array_slice($arr, $mid));
+    if(count($arr) < 2) return $arr;
+    $middle = intval(count($arr) / 2);
+    $left = mergeSort(array_slice($arr, 0, $middle));
+    $right = mergeSort(array_slice($arr, $middle));
     return merge($left, $right);
 }
 function merge($left, $right) {
     $result = [];
-    while (count($left) > 0 && count($right) > 0) {
-        if ($left[0] <= $right[0]) {
+    while(count($left) && count($right)) {
+        if($left[0] < $right[0]) {
             $result[] = array_shift($left);
         } else {
             $result[] = array_shift($right);
@@ -220,37 +155,33 @@ function merge($left, $right) {
     return array_merge($result, $left, $right);
 }
 
-// 6. QuickSort
 function quickSort($arr) {
-    if (count($arr) <= 1) return $arr;
-    $pivot = array_shift($arr);
-    $left = [];
-    $right = [];
-    foreach ($arr as $value) {
-        if ($value < $pivot) {
-            $left[] = $value;
+    if(count($arr) < 2) return $arr;
+    $pivot = $arr[0];
+    $left = $right = [];
+    for($i = 1; $i < count($arr); $i++){
+        if($arr[$i] < $pivot) {
+            $left[] = $arr[$i];
         } else {
-            $right[] = $value;
+            $right[] = $arr[$i];
         }
     }
     return array_merge(quickSort($left), [$pivot], quickSort($right));
 }
 
-// 7. Selection Sort
 function selectionSort($arr) {
     $n = count($arr);
     for ($i = 0; $i < $n - 1; $i++) {
-        $minIndex = $i;
+        $min_index = $i;
         for ($j = $i + 1; $j < $n; $j++) {
-            if ($arr[$j] < $arr[$minIndex]) {
-                $minIndex = $j;
+            if ($arr[$j] < $arr[$min_index]) {
+                $min_index = $j;
             }
         }
         $temp = $arr[$i];
-        $arr[$i] = $arr[$minIndex];
-        $arr[$minIndex] = $temp;
+        $arr[$i] = $arr[$min_index];
+        $arr[$min_index] = $temp;
     }
     return $arr;
 }
 ?>
-
