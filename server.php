@@ -18,8 +18,8 @@
 set_time_limit(0);
 error_reporting(E_ALL);
 
-$host = '0.0.0.0';
-$port = 12345; // Puerto para conexiones TCP
+$host = '192.168.1.10';
+$port = 2020; // Puerto para conexiones TCP
 
 // Crear el socket TCP
 $sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
