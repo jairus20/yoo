@@ -1,0 +1,416 @@
+# Guía de Instalación y Configuración de Postfix y Roundcube
+
+## Preparación inicial del sistema
+
+### 1. Actualizar el sistema
+```bash
+yum update -y
+```
+
+### 2. Configurar el hostname y hosts
+```bash
+# Establecer hostname
+hostnamectl set-hostname mail.nombrehost.com
+
+# Editar /etc/hosts (ya lo tienes parcialmente configurado)
+nano /etc/hosts
+```
+
+En el archivo `/etc/hosts` debe quedar así:
+```
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+192.168.1.10 mail.nombrehost.com mail
+```
+
+### 3. Configurar SELinux (ya lo tienes deshabilitado, está bien)
+```bash
+# Verificar estado
+getenforce
+# Debe mostrar "Disabled"
+```
+
+### 4. Configurar firewall
+```bash
+# Permitir servicios de correo
+firewall-cmd --permanent --add-service=smtp
+firewall-cmd --permanent --add-service=smtps
+firewall-cmd --permanent --add-service=imap
+firewall-cmd --permanent --add-service=imaps
+firewall-cmd --permanent --add-service=pop3
+firewall-cmd --permanent --add-service=pop3s
+firewall-cmd --permanent --add-port=587/tcp
+firewall-cmd --reload
+```
+
+## Instalación de Postfix
+
+### 1. Instalar Postfix y herramientas necesarias
+```bash
+yum install -y postfix postfix-mysql dovecot dovecot-mysql mariadb-server mariadb
+```
+
+### 2. Configurar MariaDB
+```bash
+# Iniciar y habilitar MariaDB
+systemctl start mariadb
+systemctl enable mariadb
+
+# Configuración segura
+mysql_secure_installation
+```
+
+### 3. Crear base de datos para correo
+```bash
+mysql -u root -p
+```
+
+En MySQL ejecutar:
+```sql
+CREATE DATABASE mailserver;
+CREATE USER 'mailuser'@'localhost' IDENTIFIED BY 'password123';
+GRANT ALL PRIVILEGES ON mailserver.* TO 'mailuser'@'localhost';
+FLUSH PRIVILEGES;
+USE mailserver;
+
+-- Crear tablas
+CREATE TABLE domains (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL
+);
+
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    domain_id INT NOT NULL,
+    email VARCHAR(100) NOT NULL,
+    password VARCHAR(106) NOT NULL,
+    FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE
+);
+
+CREATE TABLE aliases (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    domain_id INT NOT NULL,
+    source VARCHAR(100) NOT NULL,
+    destination VARCHAR(100) NOT NULL,
+    FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE
+);
+
+-- Insertar datos de prueba
+INSERT INTO domains (name) VALUES ('nombrehost.com');
+INSERT INTO users (domain_id, email, password) VALUES (1, 'admin@nombrehost.com', ENCRYPT('password123'));
+EXIT;
+```
+
+### 4. Configurar Postfix
+
+Editar `/etc/postfix/main.cf`:
+```bash
+cp /etc/postfix/main.cf /etc/postfix/main.cf.backup
+nano /etc/postfix/main.cf
+```
+
+Contenido de `main.cf`:
+```
+# Configuración básica
+myhostname = mail.nombrehost.com
+mydomain = nombrehost.com
+myorigin = $mydomain
+inet_interfaces = all
+inet_protocols = ipv4
+mydestination = $myhostname, localhost.$mydomain, localhost, $mydomain
+
+# Configuración de red
+mynetworks = 127.0.0.0/8, 192.168.1.0/24
+
+# Configuración de buzones
+home_mailbox = Maildir/
+mailbox_command = 
+
+# Configuración virtual
+virtual_mailbox_domains = mysql:/etc/postfix/mysql-virtual-mailbox-domains.cf
+virtual_mailbox_maps = mysql:/etc/postfix/mysql-virtual-mailbox-maps.cf
+virtual_alias_maps = mysql:/etc/postfix/mysql-virtual-alias-maps.cf
+virtual_mailbox_base = /var/mail/virtual
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
+
+# Configuración SASL
+smtpd_sasl_auth_enable = yes
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_sasl_authenticated_header = yes
+smtpd_sasl_security_options = noanonymous
+smtpd_sasl_tls_security_options = noanonymous
+
+# Configuración TLS
+smtpd_tls_security_level = may
+smtpd_tls_auth_only = yes
+smtpd_tls_cert_file = /etc/pki/dovecot/certs/dovecot.pem
+smtpd_tls_key_file = /etc/pki/dovecot/private/dovecot.pem
+smtpd_tls_loglevel = 1
+smtpd_tls_received_header = yes
+smtpd_tls_session_cache_timeout = 3600s
+tls_random_source = dev:/dev/urandom
+
+# Restricciones
+smtpd_recipient_restrictions = 
+    permit_sasl_authenticated,
+    permit_mynetworks,
+    reject_unauth_destination
+```
+
+### 5. Crear archivos de configuración MySQL para Postfix
+
+`/etc/postfix/mysql-virtual-mailbox-domains.cf`:
+```
+user = mailuser
+password = password123
+hosts = localhost
+dbname = mailserver
+query = SELECT 1 FROM domains WHERE name='%s'
+```
+
+`/etc/postfix/mysql-virtual-mailbox-maps.cf`:
+```
+user = mailuser
+password = password123
+hosts = localhost
+dbname = mailserver
+query = SELECT 1 FROM users WHERE email='%s'
+```
+
+`/etc/postfix/mysql-virtual-alias-maps.cf`:
+```
+user = mailuser
+password = password123
+hosts = localhost
+dbname = mailserver
+query = SELECT destination FROM aliases WHERE source='%s'
+```
+
+### 6. Configurar permisos
+```bash
+chmod 640 /etc/postfix/mysql-*.cf
+chown root:postfix /etc/postfix/mysql-*.cf
+
+# Crear directorio para buzones virtuales
+mkdir -p /var/mail/virtual
+groupadd -g 5000 vmail
+useradd -g vmail -u 5000 vmail -d /var/mail/virtual
+chown -R vmail:vmail /var/mail/virtual
+```
+
+## Configuración de Dovecot
+
+### 1. Configurar Dovecot
+```bash
+cp /etc/dovecot/dovecot.conf /etc/dovecot/dovecot.conf.backup
+nano /etc/dovecot/dovecot.conf
+```
+
+Contenido principal:
+```
+protocols = imap pop3 lmtp
+listen = *, ::
+base_dir = /var/run/dovecot/
+instance_name = dovecot
+```
+
+### 2. Configurar autenticación
+```bash
+nano /etc/dovecot/conf.d/10-auth.conf
+```
+
+Modificar:
+```
+disable_plaintext_auth = yes
+auth_mechanisms = plain login
+!include auth-sql.conf.ext
+```
+
+### 3. Configurar base de datos
+```bash
+nano /etc/dovecot/conf.d/auth-sql.conf.ext
+```
+
+Contenido:
+```
+passdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
+userdb {
+  driver = static
+  args = uid=vmail gid=vmail home=/var/mail/virtual/%d/%n
+}
+```
+
+### 4. Configurar conexión SQL
+```bash
+nano /etc/dovecot/dovecot-sql.conf.ext
+```
+
+Contenido:
+```
+driver = mysql
+connect = host=localhost dbname=mailserver user=mailuser password=password123
+default_pass_scheme = CRYPT
+password_query = SELECT email as user, password FROM users WHERE email='%u'
+```
+
+### 5. Configurar buzones
+```bash
+nano /etc/dovecot/conf.d/10-mail.conf
+```
+
+Modificar:
+```
+mail_location = maildir:/var/mail/virtual/%d/%n
+mail_uid = vmail
+mail_gid = vmail
+first_valid_uid = 5000
+last_valid_uid = 5000
+```
+
+## Instalación de Apache y PHP
+
+### 1. Instalar Apache y PHP
+```bash
+yum install -y httpd php php-mysql php-mbstring php-intl php-xml php-json php-zip
+```
+
+### 2. Iniciar servicios
+```bash
+systemctl start httpd
+systemctl enable httpd
+systemctl start postfix
+systemctl enable postfix
+systemctl start dovecot
+systemctl enable dovecot
+```
+
+## Instalación de Roundcube
+
+### 1. Descargar Roundcube
+```bash
+cd /var/www/html
+wget https://github.com/roundcube/roundcubemail/releases/download/1.6.5/roundcubemail-1.6.5-complete.tar.gz
+tar -xzf roundcubemail-1.6.5-complete.tar.gz
+mv roundcubemail-1.6.5 roundcube
+chown -R apache:apache roundcube
+```
+
+### 2. Crear base de datos para Roundcube
+```bash
+mysql -u root -p
+```
+
+```sql
+CREATE DATABASE roundcube;
+CREATE USER 'roundcube'@'localhost' IDENTIFIED BY 'roundcube123';
+GRANT ALL PRIVILEGES ON roundcube.* TO 'roundcube'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+```
+
+### 3. Configurar Roundcube
+```bash
+cd /var/www/html/roundcube
+cp config/config.inc.php.sample config/config.inc.php
+nano config/config.inc.php
+```
+
+Configuraciones importantes:
+```php
+$config['db_dsnw'] = 'mysql://roundcube:roundcube123@localhost/roundcube';
+$config['default_host'] = 'localhost';
+$config['smtp_server'] = 'localhost';
+$config['smtp_port'] = 587;
+$config['smtp_user'] = '%u';
+$config['smtp_pass'] = '%p';
+$config['support_url'] = '';
+$config['product_name'] = 'Mi Servidor de Correo';
+$config['des_key'] = 'rcmail-!24ByteDESkey*Str';
+```
+
+### 4. Instalar esquema de base de datos
+```bash
+mysql -u roundcube -p roundcube < SQL/mysql.initial.sql
+```
+
+## Configuración de DNS (Simulado para pruebas locales)
+
+### 1. Configurar resolución local
+Agregar en `/etc/hosts` de las máquinas cliente:
+```
+192.168.1.10 mail.nombrehost.com webmail.nombrehost.com
+```
+
+## Pruebas del sistema
+
+### 1. Verificar servicios
+```bash
+systemctl status postfix
+systemctl status dovecot
+systemctl status httpd
+systemctl status mariadb
+```
+
+### 2. Probar conexión SMTP
+```bash
+telnet localhost 25
+```
+
+### 3. Probar Webmail
+Acceder a: `http://192.168.1.10/roundcube`
+
+Credenciales de prueba:
+- Usuario: admin@nombrehost.com
+- Contraseña: password123
+
+## Solución de problemas comunes
+
+### 1. Revisar logs
+```bash
+tail -f /var/log/maillog
+tail -f /var/log/dovecot.log
+tail -f /var/log/httpd/error_log
+```
+
+### 2. Verificar permisos
+```bash
+ls -la /var/mail/virtual
+ls -la /var/www/html/roundcube
+```
+
+### 3. Verificar puertos
+```bash
+netstat -tulpn | grep -E ':(25|587|993|995|80)'
+```
+
+## Configuraciones adicionales de seguridad
+
+### 1. Configurar certificados SSL
+```bash
+# Generar certificado autofirmado para pruebas
+openssl req -new -x509 -days 365 -nodes -out /etc/pki/dovecot/certs/dovecot.pem -keyout /etc/pki/dovecot/private/dovecot.pem
+```
+
+### 2. Configurar logrotate
+```bash
+nano /etc/logrotate.d/mailserver
+```
+
+Contenido:
+```
+/var/log/maillog {
+    daily
+    missingok
+    rotate 7
+    compress
+    notifempty
+    create 644 root root
+}
+```
+
+Esta configuración te permitirá tener un servidor de correo funcional con interfaz web. ¡Avísame si necesitas ayuda con algún paso específico!
